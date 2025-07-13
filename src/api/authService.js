@@ -14,12 +14,13 @@ const authService = {
     }
   },
 
-  register: async (name, email, password) => {
+  register: async (name, email, password, role) => {
     try {
       const response = await axios.post(`${API_URL}/auth/register`, {
         name,
         email,
         password,
+        role,
       });
       console.log('Réponse du serveur:', response.data);
       return response.data;

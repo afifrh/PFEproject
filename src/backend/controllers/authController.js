@@ -6,10 +6,14 @@ const JWT_SECRET = 'votre_secret_jwt';
 
 exports.register = async (req, res) => {
   try {
-    const { name, email, password } = req.body;
+    const { name, email, password, role } = req.body;
 
-    if (!name || !email || !password) {
-      return res.status(400).json({ message: 'Tous les champs sont requis' });
+    if (!name || !email || !password || !role) {
+      return res.status(400).json({ message: 'Tous les champs sont requis (y compris le rôle)' });
+    }
+
+    if (!['technician', 'expert'].includes(role)) {
+      return res.status(400).json({ message: 'Rôle invalide' });
     }
 
     // Vérifier si l'utilisateur existe déjà
@@ -25,15 +29,16 @@ exports.register = async (req, res) => {
     const user = new User({
       name,
       email,
-      password: hashedPassword
+      password: hashedPassword,
+      role
     });
 
     await user.save();
 
     // Générer le token
-    const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '24h' });
+    const token = jwt.sign({ userId: user._id, role: user.role }, JWT_SECRET, { expiresIn: '24h' });
 
-    res.status(201).json({ token, message: 'Inscription réussie' });
+    res.status(201).json({ token, role: user.role, message: 'Inscription réussie' });
   } catch (error) {
     console.error('Erreur d\'inscription:', error);
     res.status(500).json({ message: error.message || 'Erreur lors de l\'inscription' });
@@ -57,10 +62,29 @@ exports.login = async (req, res) => {
     }
 
     // Générer le token
-    const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '24h' });
+    const token = jwt.sign({ userId: user._id, role: user.role }, JWT_SECRET, { expiresIn: '24h' });
 
-    res.json({ token });
+    res.json({ token, role: user.role });
   } catch (error) {
     res.status(500).json({ message: 'Erreur lors de la connexion' });
+  }
+};
+// Get all experts
+exports.getExperts = async (req, res) => {
+  try {
+    const experts = await User.find({ role: 'expert' }).select('-password');
+    res.json(experts);
+  } catch (error) {
+    res.status(500).json({ message: error.message || 'Erreur lors de la récupération des experts' });
+  }
+};
+
+// Get all technicians
+exports.getTechnicians = async (req, res) => {
+  try {
+    const technicians = await User.find({ role: 'technician' }).select('-password');
+    res.json(technicians);
+  } catch (error) {
+    res.status(500).json({ message: error.message || 'Erreur lors de la récupération des techniciens' });
   }
 };

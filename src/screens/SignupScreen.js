@@ -18,9 +18,10 @@ const SignupScreen = ({ navigation }) => {
   const [password, setPassword] = useState('');
   const { signIn } = useAuth();
   const [loading, setLoading] = useState(false);
+  const [role, setRole] = useState('technician');
 
   const handleSignup = async () => {
-    if (!name || !email || !password) {
+    if (!name || !email || !password || !role) {
       Alert.alert('Erreur', 'Veuillez remplir tous les champs');
       return;
     }
@@ -37,7 +38,7 @@ const SignupScreen = ({ navigation }) => {
 
     setLoading(true);
     try {
-      const response = await authService.register(name, email, password);
+      const response = await authService.register(name, email, password, role);
       if (response && response.token) {
         await signIn(response.token);
         // Ne pas utiliser navigation.navigate ici
@@ -99,6 +100,31 @@ const SignupScreen = ({ navigation }) => {
             />
           </View>
           
+          {/* Role selection */}
+          <View style={{ flexDirection: 'row', justifyContent: 'center', marginBottom: 20 }}>
+            <TouchableOpacity
+              style={{
+                backgroundColor: role === 'technician' ? '#FF6B6B' : '#ccc',
+                padding: 10,
+                borderRadius: 10,
+                marginRight: 10,
+              }}
+              onPress={() => setRole('technician')}
+            >
+              <Text style={{ color: role === 'technician' ? '#fff' : '#333' }}>Technician</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={{
+                backgroundColor: role === 'expert' ? '#FF6B6B' : '#ccc',
+                padding: 10,
+                borderRadius: 10,
+              }}
+              onPress={() => setRole('expert')}
+            >
+              <Text style={{ color: role === 'expert' ? '#fff' : '#333' }}>Expert</Text>
+            </TouchableOpacity>
+          </View>
+
           <TouchableOpacity style={styles.button} onPress={handleSignup}>
             <Text style={styles.buttonText}>S'inscrire</Text>
           </TouchableOpacity>

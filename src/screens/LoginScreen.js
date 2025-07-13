@@ -27,7 +27,7 @@ const LoginScreen = ({ navigation }) => {
     setLoading(true);
     try {
       const response = await authService.login(email, password);
-      await signIn(response.token);
+      await signIn(response.token, response.role);
     } catch (error) {
       Alert.alert(
         'Erreur',

@@ -23,11 +23,11 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
-  const signIn = async (token) => {
+  const signIn = async (token, role) => {
     setLoading(true);
     try {
       await storeToken(token);
-      setUser({ token });
+      setUser({ token, role });
     } catch (error) {
       console.error('Erreur lors de la connexion:', error);
     } finally {
