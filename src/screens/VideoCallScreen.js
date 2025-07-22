@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { View, Button, Text, StyleSheet, Alert, ActivityIndicator } from 'react-native';
+import { View, Button, Text, StyleSheet, Alert, ActivityIndicator, TouchableOpacity } from 'react-native';
 import { RTCPeerConnection, RTCView, mediaDevices } from 'react-native-webrtc';
 import io from 'socket.io-client';
-import { useRoute } from '@react-navigation/native';
+import { useRoute, useNavigation } from '@react-navigation/native';
 import { useAuth } from '../context/AuthContext';
 
 const SIGNALING_SERVER_URL = 'http://192.168.1.23:5000';
@@ -15,135 +15,121 @@ const configuration = {
 
 const VideoCallScreen = () => {
   const route = useRoute();
+  const navigation = useNavigation();
   const { user } = useAuth();
   const roomId = route.params?.roomId || 'test-room';
-  const expertName = route.params?.expertName || '';
+  const expertName = route.params?.expertName || route.params?.callerName || '';
   const isInitiator = route.params?.isInitiator || false;
   
   const [localStream, setLocalStream] = useState(null);
   const [remoteStream, setRemoteStream] = useState(null);
   const [connected, setConnected] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
   const [socketConnected, setSocketConnected] = useState(false);
+  const [callState, setCallState] = useState('connecting'); // connecting, connected, ended
   
   const socketRef = useRef(null);
   const pcRef = useRef(null);
   const remoteSocketId = useRef(null);
-
-  const emitSocketEvent = useCallback((eventName, data) => {
-    if (!socketRef.current) {
-      console.error(`Cannot emit ${eventName}: Socket is null`);
-      return false;
-    }
-    
-    if (!socketRef.current.connected) {
-      console.error(`Cannot emit ${eventName}: Socket is not connected`);
-      return false;
-    }
-    
-    try {
-      console.log(`Emitting ${eventName} event:`, data);
-      socketRef.current.emit(eventName, data);
-      return true;
-    } catch (error) {
-      console.error(`Error emitting ${eventName}:`, error);
-      return false;
-    }
-  }, []);
-
-  const initializeCall = async () => {
-    try {
-      console.log('Initializing call...');
-      await startLocalStream();
-      if (socketRef.current?.connected) {
-        console.log('Local stream started, joining room:', roomId);
-        emitSocketEvent('join-room', { roomId });
-      } else {
-        console.error('Socket not connected, cannot join room');
-        handleError('Socket connection not established');
-      }
-    } catch (error) {
-      console.error('Call initialization error:', error);
-      handleError('Failed to initialize call: ' + error.message);
-    }
-  };
+  const isCleaningUp = useRef(false);
 
   const handleError = useCallback((message) => {
-    console.error(message);
+    if (isCleaningUp.current) return;
+    
+    console.error('VideoCall Error:', message);
     setError(message);
     setIsLoading(false);
-    Alert.alert('Erreur', message);
+    setCallState('ended');
   }, []);
 
   const cleanup = useCallback(() => {
+    if (isCleaningUp.current) return;
+    isCleaningUp.current = true;
+    
     console.log('Cleaning up VideoCallScreen...');
+    
     try {
+      // Stop local stream
       if (localStream) {
-        console.log('Stopping local stream tracks...');
         localStream.getTracks().forEach(track => {
           track.stop();
           console.log('Stopped track:', track.kind);
         });
       }
 
+      // Close peer connection
       if (pcRef.current) {
-        console.log('Closing peer connection...');
-        // Check if the connection is not already closed
-        if (pcRef.current.iceConnectionState !== 'closed') {
-          pcRef.current.close();
+        try {
+          if (pcRef.current.iceConnectionState !== 'closed') {
+            pcRef.current.close();
+          }
+        } catch (error) {
+          console.error('Error closing peer connection:', error);
         }
         pcRef.current = null;
       }
 
-      if (socketRef.current) {
-        console.log('Disconnecting socket...');
-        if (socketRef.current.connected) {
+      // End call on server and disconnect socket
+      if (socketRef.current && socketRef.current.connected) {
+        try {
+          socketRef.current.emit('end-call', { roomId });
           socketRef.current.disconnect();
+        } catch (error) {
+          console.error('Error during socket cleanup:', error);
         }
-        socketRef.current = null;
       }
+      socketRef.current = null;
 
+      // Reset state
       setLocalStream(null);
       setRemoteStream(null);
       setConnected(false);
       setSocketConnected(false);
+      remoteSocketId.current = null;
+      
       console.log('Cleanup completed successfully');
     } catch (error) {
       console.error('Error during cleanup:', error);
     }
-  }, [localStream]);
+  }, [localStream, roomId]);
 
-  useEffect(() => {
-    return () => {
-      console.log('Component unmounting, performing cleanup...');
-      cleanup();
-    };
-  }, [cleanup]);
+  const endCall = useCallback(() => {
+    console.log('Ending call...');
+    cleanup();
+    navigation.goBack();
+  }, [cleanup, navigation]);
 
   const createPeerConnection = useCallback((stream) => {
+    if (isCleaningUp.current) return null;
+    
     try {
       if (pcRef.current) {
-        console.log('Closing existing PeerConnection before creating a new one');
+        console.log('Closing existing PeerConnection');
         pcRef.current.close();
-        pcRef.current = null;
       }
       
-      console.log('Initializing PeerConnection with stream:', stream.id);
-      pcRef.current = new RTCPeerConnection(configuration);
+      console.log('Creating new PeerConnection');
+      const pc = new RTCPeerConnection(configuration);
+      pcRef.current = pc;
       
-      // Utiliser addStream au lieu de addTrack
-      pcRef.current.addStream(stream);
-      console.log('Stream added to PeerConnection');
+      // Add stream
+      pc.addStream(stream);
+      console.log('Local stream added to PeerConnection');
       
-      pcRef.current.onaddstream = (event) => {
-        console.log('Received remote stream');
-        setRemoteStream(event.stream);
+      // Handle remote stream
+      pc.onaddstream = (event) => {
+        console.log('Remote stream received');
+        if (!isCleaningUp.current) {
+          setRemoteStream(event.stream);
+          setCallState('connected');
+        }
       };
       
-      pcRef.current.onicecandidate = (event) => {
+      // Handle ICE candidates
+      pc.onicecandidate = (event) => {
         if (event.candidate && remoteSocketId.current && socketRef.current?.connected) {
-          console.log('Sending ICE candidate to remote peer');
+          console.log('Sending ICE candidate');
           socketRef.current.emit('signal', {
             roomId,
             signal: event.candidate,
@@ -152,28 +138,41 @@ const VideoCallScreen = () => {
         }
       };
       
-      pcRef.current.oniceconnectionstatechange = () => {
-        if (!pcRef.current) {
-          console.log('PeerConnection is null, cannot check iceConnectionState');
-          return;
-        }
+      // Handle connection state changes
+      pc.oniceconnectionstatechange = () => {
+        if (!pcRef.current || isCleaningUp.current) return;
         
-        console.log('ICE connection state:', pcRef.current.iceConnectionState);
-        if (pcRef.current.iceConnectionState === 'failed') {
-          handleError('Connection failed');
+        const state = pcRef.current.iceConnectionState;
+        console.log('ICE connection state:', state);
+        
+        switch (state) {
+          case 'connected':
+          case 'completed':
+            setCallState('connected');
+            break;
+          case 'failed':
+          case 'disconnected':
+          case 'closed':
+            if (!isCleaningUp.current) {
+              handleError('Connection lost');
+            }
+            break;
         }
       };
 
-      console.log('PeerConnection initialized successfully');
-      
+      return pc;
     } catch (error) {
-      console.error('PeerConnection creation failed:', error);
-      handleError('Failed to create peer connection: ' + error.message);
+      console.error('Failed to create PeerConnection:', error);
+      handleError('Failed to create peer connection');
+      return null;
     }
   }, [roomId, handleError]);
 
   const startLocalStream = useCallback(async () => {
+    if (isCleaningUp.current) return;
+    
     try {
+      console.log('Starting local stream...');
       setIsLoading(true);
       setError(null);
       
@@ -182,208 +181,227 @@ const VideoCallScreen = () => {
         audio: true 
       });
       
+      if (isCleaningUp.current) {
+        stream.getTracks().forEach(track => track.stop());
+        return;
+      }
+      
       setLocalStream(stream);
       setConnected(true);
-      createPeerConnection(stream);
+      
+      // Create peer connection with the stream
+      const pc = createPeerConnection(stream);
+      if (!pc) {
+        throw new Error('Failed to create peer connection');
+      }
+      
+      console.log('Local stream started successfully');
       
     } catch (error) {
-      handleError('Failed to get media devices');
+      console.error('Failed to start local stream:', error);
+      handleError('Cannot access camera/microphone');
     } finally {
       setIsLoading(false);
     }
   }, [createPeerConnection, handleError]);
 
   const createOffer = useCallback(async () => {
+    if (isCleaningUp.current || !pcRef.current || !socketRef.current?.connected) {
+      console.log('Cannot create offer: invalid state');
+      return;
+    }
+
     try {
-      if (!pcRef.current) {
-        throw new Error('PeerConnection not initialized');
-      }
-
-      if (!localStream) {
-        throw new Error('Local stream not available');
-      }
-      
-      if (!socketRef.current?.connected) {
-        throw new Error('Socket not connected');
-      }
-
-      console.log('Creating offer, PeerConnection state:', pcRef.current.connectionState);
+      console.log('Creating offer...');
       const offer = await pcRef.current.createOffer();
-      console.log('Offer created successfully:', offer);
       await pcRef.current.setLocalDescription(offer);
-      console.log('Local description set successfully');
       
-      emitSocketEvent('signal', {
+      socketRef.current.emit('signal', {
         roomId,
         signal: offer,
         to: remoteSocketId.current,
       });
-      console.log('Offer sent to remote peer:', remoteSocketId.current);
+      
+      console.log('Offer sent successfully');
     } catch (error) {
-      console.error('Offer creation failed:', error);
-      handleError('Failed to create offer: ' + error.message);
+      console.error('Failed to create offer:', error);
+      handleError('Failed to initiate call');
     }
-  }, [roomId, handleError, localStream, emitSocketEvent]);
+  }, [roomId, handleError]);
 
   const createAnswer = useCallback(async (offer, from) => {
+    if (isCleaningUp.current || !pcRef.current || !socketRef.current?.connected) {
+      console.log('Cannot create answer: invalid state');
+      return;
+    }
+    
     try {
-      if (!pcRef.current) {
-        console.error('PeerConnection is null, cannot create answer');
-        return;
-      }
-      
-      if (!socketRef.current?.connected) {
-        console.error('Socket not connected, cannot send answer');
-        return;
-      }
-      
+      console.log('Creating answer for offer from:', from);
       remoteSocketId.current = from;
-      await pcRef.current.setRemoteDescription(offer);
       
+      await pcRef.current.setRemoteDescription(offer);
       const answer = await pcRef.current.createAnswer();
       await pcRef.current.setLocalDescription(answer);
       
-      emitSocketEvent('signal', {
+      socketRef.current.emit('signal', {
         roomId,
         signal: answer,
         to: from,
       });
+      
+      console.log('Answer sent successfully');
     } catch (error) {
-      console.error('Answer creation failed:', error);
-      handleError('Failed to create answer: ' + error.message);
+      console.error('Failed to create answer:', error);
+      handleError('Failed to answer call');
     }
-  }, [roomId, handleError, emitSocketEvent]);
+  }, [roomId, handleError]);
 
-  const handleSocketSignal = useCallback(
-    async ({ from, signal }) => {
-      console.log(`Received signal from ${from}:`, signal);
-      try {
-        if (!pcRef.current) {
-          console.error('PeerConnection is null, cannot process signal');
-          return;
-        }
-        
-        if (signal.type === 'offer') {
-          console.log('Processing offer from', from);
-          await createAnswer(signal, from);
-        } else if (signal.type === 'answer') {
-          console.log('Processing answer from', from);
-          await pcRef.current.setRemoteDescription(signal);
-        } else if (signal.candidate) {
-          console.log('Processing ICE candidate from', from);
-          await pcRef.current.addIceCandidate(signal);
-        }
-      } catch (error) {
-        console.error('Signal handling failed:', error);
-        handleError('Signal handling failed: ' + error.message);
+  const handleSocketSignal = useCallback(async ({ from, signal }) => {
+    if (isCleaningUp.current || !pcRef.current) {
+      console.log('Ignoring signal: cleanup in progress or no peer connection');
+      return;
+    }
+    
+    try {
+      console.log(`Processing signal from ${from}:`, signal.type || 'ice-candidate');
+      
+      if (signal.type === 'offer') {
+        await createAnswer(signal, from);
+      } else if (signal.type === 'answer') {
+        await pcRef.current.setRemoteDescription(signal);
+        console.log('Answer processed successfully');
+      } else if (signal.candidate) {
+        await pcRef.current.addIceCandidate(signal);
+        console.log('ICE candidate added');
       }
-    },
-    [createAnswer, handleError]
-  );
+    } catch (error) {
+      console.error('Failed to handle signal:', error);
+      // Don't show error for ICE candidate failures as they're common
+      if (signal.type === 'offer' || signal.type === 'answer') {
+        handleError('Call connection failed');
+      }
+    }
+  }, [createAnswer, handleError]);
 
+  // Initialize socket connection and join room
   useEffect(() => {
+    if (isCleaningUp.current) return;
+
+    console.log('Initializing socket connection for room:', roomId);
+    
     socketRef.current = io(SIGNALING_SERVER_URL, {
       reconnection: true,
-      reconnectionAttempts: 10,
+      reconnectionAttempts: 5,
       reconnectionDelay: 1000,
       timeout: 10000,
       transports: ['websocket', 'polling'],
-      path: '/socket.io/',
-      withCredentials: false,
-      forceNew: true,
-      autoConnect: true
+      forceNew: true
     });
 
-    socketRef.current.on('connect', () => {
-      console.log('Socket connected successfully');
+    const socket = socketRef.current;
+
+    socket.on('connect', () => {
+      if (isCleaningUp.current) return;
+      
+      console.log('Socket connected, joining room...');
       setSocketConnected(true);
-      initializeCall();
+      
+      // Join the room
+      socket.emit('join-room', { roomId });
+      
+      // Identify user
+      socket.emit('join', {
+        userId: user.token,
+        role: user.role
+      });
     });
 
-    socketRef.current.on('disconnect', () => {
-      console.log('Socket disconnected');
+    socket.on('disconnect', (reason) => {
+      console.log('Socket disconnected:', reason);
       setSocketConnected(false);
-      handleError('Disconnected from server');
-    });
-    
-    socketRef.current.on('connect_error', (error) => {
-      console.error('Socket connection error:', error);
-      handleError('Connection error: ' + error.message);
-    });
-
-    socketRef.current.on('reconnect', (attemptNumber) => {
-      console.log('Socket reconnected after', attemptNumber, 'attempts');
-      if (localStream) {
-        console.log('Rejoining room after reconnection');
-        socketRef.current.emit('join-room', { roomId });
+      if (!isCleaningUp.current) {
+        handleError('Disconnected from server');
       }
     });
 
-    socketRef.current.on('reconnect_error', (error) => {
-      console.error('Socket reconnection error:', error);
-      handleError('Reconnection failed: ' + error.message);
+    socket.on('connect_error', (error) => {
+      console.error('Socket connection error:', error);
+      if (!isCleaningUp.current) {
+        handleError('Connection failed');
+      }
     });
 
-    socketRef.current.on('reconnect_failed', () => {
-      console.error('Socket reconnection failed after all attempts');
-      handleError('Failed to reconnect after multiple attempts');
-      cleanup();
-    });
-    
-    socketRef.current.on('user-joined', (id) => {
-      console.log('User joined:', id);
+    socket.on('user-joined', (id) => {
+      if (isCleaningUp.current) return;
+      
+      console.log('User joined room:', id);
       remoteSocketId.current = id;
-      if (isInitiator && pcRef.current) {
+      
+      // If this is the initiator and we have local stream, create offer
+      if (isInitiator && localStream && pcRef.current) {
+        console.log('Creating offer as initiator');
         createOffer();
       }
     });
-    
-    socketRef.current.on('signal', handleSocketSignal);
-    
-    socketRef.current.on('disconnect', () => {
-      handleError('Disconnected from server');
-    });
-    
-    return cleanup;
-  }, [roomId, isInitiator, createOffer, handleSocketSignal, cleanup, handleError, startLocalStream]);
 
-  const handleRetryConnection = useCallback(() => {
-    console.log('Retrying connection...');
-    cleanup();
-    if (socketRef.current) {
-      socketRef.current.connect();
-    } else {
-      initializeCall();
+    socket.on('signal', handleSocketSignal);
+
+    socket.on('call-ended', ({ reason }) => {
+      console.log('Call ended by remote:', reason);
+      if (!isCleaningUp.current) {
+        Alert.alert('Appel terminé', 'L\'autre participant a quitté l\'appel');
+        endCall();
+      }
+    });
+
+    // Start local stream
+    startLocalStream();
+
+    return () => {
+      console.log('VideoCallScreen unmounting');
+      cleanup();
+    };
+  }, [roomId, isInitiator, user, createOffer, handleSocketSignal, startLocalStream, endCall, cleanup, handleError]);
+
+  // Handle local stream changes
+  useEffect(() => {
+    if (localStream && socketRef.current?.connected && !remoteSocketId.current && isInitiator) {
+      // Wait a bit for the other user to join
+      const timer = setTimeout(() => {
+        if (pcRef.current && !remoteSocketId.current) {
+          console.log('No remote user found, but peer connection exists');
+        }
+      }, 3000);
+      
+      return () => clearTimeout(timer);
     }
-  }, [cleanup, initializeCall]);
+  }, [localStream, isInitiator]);
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Appel Vidéo</Text>
-      {expertName && <Text style={styles.subtitle}>Avec: {expertName}</Text>}
-      
-      <View style={styles.statusContainer}>
-        <Text style={[styles.statusText, socketConnected ? styles.connected : styles.disconnected]}>
-          {socketConnected ? 'Connecté' : 'Déconnecté'}
-        </Text>
-        {!socketConnected && (
-          <Button 
-            title="Réessayer" 
-            onPress={handleRetryConnection}
-            disabled={isLoading}
-          />
-        )}
+      <View style={styles.header}>
+        <Text style={styles.title}>Appel Vidéo</Text>
+        {expertName && <Text style={styles.subtitle}>Avec: {expertName}</Text>}
+        
+        <View style={styles.statusContainer}>
+          <Text style={[styles.statusText, socketConnected ? styles.connected : styles.disconnected]}>
+            {socketConnected ? '🟢 Connecté' : '🔴 Déconnecté'}
+          </Text>
+          <Text style={styles.callState}>
+            État: {callState === 'connecting' ? 'Connexion...' : 
+                   callState === 'connected' ? 'En cours' : 'Terminé'}
+          </Text>
+        </View>
       </View>
 
-      {error && <Text style={styles.error}>{error}</Text>}
-      
-      {!connected ? (
-        <Button 
-          title={isLoading ? "Connexion..." : "Démarrer l'appel"} 
-          onPress={startLocalStream} 
-          disabled={isLoading || !socketConnected}
-        />
-      ) : null}
+      {error && (
+        <View style={styles.errorContainer}>
+          <Text style={styles.error}>{error}</Text>
+          <TouchableOpacity style={styles.retryButton} onPress={startLocalStream}>
+            <Text style={styles.retryButtonText}>Réessayer</Text>
+          </TouchableOpacity>
+        </View>
+      )}
       
       <View style={styles.videoContainer}>
         {remoteStream ? (
@@ -391,10 +409,14 @@ const VideoCallScreen = () => {
             streamURL={remoteStream.toURL()}
             style={styles.remoteVideo}
             objectFit="cover"
+            mirror={false}
           />
         ) : (
           <View style={styles.placeholder}>
-            <Text>En attente de connexion...</Text>
+            <Text style={styles.placeholderText}>
+              {callState === 'connecting' ? 'En attente de connexion...' : 'Aucun flux vidéo'}
+            </Text>
+            {isLoading && <ActivityIndicator size="large" color="#007AFF" />}
           </View>
         )}
         
@@ -403,11 +425,16 @@ const VideoCallScreen = () => {
             streamURL={localStream.toURL()}
             style={styles.localVideo}
             objectFit="cover"
+            mirror={true}
           />
         )}
       </View>
       
-      {isLoading && <ActivityIndicator size="large" />}
+      <View style={styles.controls}>
+        <TouchableOpacity style={styles.endCallButton} onPress={endCall}>
+          <Text style={styles.endCallButtonText}>Raccrocher</Text>
+        </TouchableOpacity>
+      </View>
     </View>
   );
 };
@@ -415,68 +442,123 @@ const VideoCallScreen = () => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: '#000',
+  },
+  header: {
+    backgroundColor: 'rgba(0,0,0,0.8)',
     padding: 20,
-    backgroundColor: '#f5f5f5'
+    paddingTop: 50,
   },
   title: {
     fontSize: 24,
     fontWeight: 'bold',
-    marginBottom: 10,
-    textAlign: 'center'
+    color: '#fff',
+    textAlign: 'center',
+    marginBottom: 5,
   },
   subtitle: {
     fontSize: 16,
-    marginBottom: 20,
-    textAlign: 'center'
+    color: '#ccc',
+    textAlign: 'center',
+    marginBottom: 15,
+  },
+  statusContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  statusText: {
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  connected: {
+    color: '#4CAF50',
+  },
+  disconnected: {
+    color: '#f44336',
+  },
+  callState: {
+    fontSize: 14,
+    color: '#fff',
+  },
+  errorContainer: {
+    backgroundColor: 'rgba(244, 67, 54, 0.9)',
+    padding: 15,
+    margin: 20,
+    borderRadius: 8,
+    alignItems: 'center',
   },
   error: {
-    color: 'red',
-    marginBottom: 20,
-    textAlign: 'center'
+    color: '#fff',
+    fontSize: 16,
+    textAlign: 'center',
+    marginBottom: 10,
+  },
+  retryButton: {
+    backgroundColor: '#fff',
+    paddingHorizontal: 20,
+    paddingVertical: 8,
+    borderRadius: 5,
+  },
+  retryButtonText: {
+    color: '#f44336',
+    fontWeight: 'bold',
   },
   videoContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    marginVertical: 20
   },
   remoteVideo: {
     width: '100%',
-    height: '70%',
-    backgroundColor: 'black'
+    height: '100%',
+    backgroundColor: '#000',
   },
   localVideo: {
     position: 'absolute',
-    width: 100,
-    height: 150,
+    width: 120,
+    height: 160,
     right: 20,
-    bottom: 20,
-    backgroundColor: 'black'
+    top: 20,
+    backgroundColor: '#000',
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: '#fff',
   },
   placeholder: {
     width: '100%',
-    height: '70%',
+    height: '100%',
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#eee'
+    backgroundColor: '#333',
   },
-  statusContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 10,
-    gap: 10
-  },
-  statusText: {
+  placeholderText: {
+    color: '#fff',
     fontSize: 16,
-    fontWeight: 'bold'
+    textAlign: 'center',
+    marginBottom: 20,
   },
-  connected: {
-    color: '#4CAF50'
+  controls: {
+    backgroundColor: 'rgba(0,0,0,0.8)',
+    padding: 20,
+    alignItems: 'center',
   },
-  disconnected: {
-    color: '#f44336'
-  }
+  endCallButton: {
+    backgroundColor: '#f44336',
+    paddingHorizontal: 40,
+    paddingVertical: 15,
+    borderRadius: 25,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  endCallButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
 });
 
 export default VideoCallScreen;
