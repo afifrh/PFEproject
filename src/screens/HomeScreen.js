@@ -3,8 +3,9 @@ import { View, Text, StyleSheet, TouchableOpacity, Alert, FlatList, ActivityIndi
 import { useAuth } from '../context/AuthContext';
 import io from 'socket.io-client';
 import userService from '../api/userService';
+import { jwtDecode } from 'jwt-decode';
 
-const SIGNALING_SERVER_URL = 'http://localhost:5000'; // Change to your server IP if needed
+const SIGNALING_SERVER_URL = 'http://192.168.1.23:5000';
 
 const HomeScreen = ({ navigation }) => {
   const { signOut, user } = useAuth();
@@ -15,40 +16,77 @@ const HomeScreen = ({ navigation }) => {
   const [calledExpertId, setCalledExpertId] = useState(null);
   const socketRef = useRef();
 
-  // For expert: listen for incoming call
+  // Initialiser la connexion socket
   useEffect(() => {
-    if (user && user.role === 'expert') {
+    if (user) {
       socketRef.current = io(SIGNALING_SERVER_URL);
       
       socketRef.current.on('connect', () => {
-        console.log('Expert connected to socket');
-        socketRef.current.emit('join', user.token);
+        console.log('Connected to socket server');
+        // S'identifier auprès du serveur
+        socketRef.current.emit('join', {
+          userId: user.token,
+          _id: user.token,
+          role: user.role
+        });
       });
-      
-      socketRef.current.on('incoming-call', (callData) => {
-        console.log('Incoming call received:', callData);
-        setIncomingCall(callData);
-      });
-      
-      socketRef.current.on('call-ended', () => {
-        console.log('Call ended');
+
+      // Événements pour les experts
+      if (user.role === 'expert') {
+        socketRef.current.on('incoming-call', (callData) => {
+          console.log('Incoming call received:', callData);
+          setIncomingCall(callData);
+        });
+      }
+
+      // Événements pour les techniciens
+      if (user.role === 'technician') {
+        socketRef.current.on('call-accepted', ({ roomId }) => {
+          console.log('Call accepted, joining room:', roomId);
+          setCallActive(false);
+          navigation.navigate('VideoCallScreen', {
+            roomId: roomId,
+            expertName: 'Expert',
+            isInitiator: true,
+          });
+        });
+
+        socketRef.current.on('call-declined', () => {
+          console.log('Call declined');
+          Alert.alert('Appel décliné', 'L\'expert a décliné votre appel');
+          setCallActive(false);
+          setCalledExpertId(null);
+        });
+
+        socketRef.current.on('call-failed', ({ message }) => {
+          console.log('Call failed:', message);
+          Alert.alert('Échec de l\'appel', message);
+          setCallActive(false);
+          setCalledExpertId(null);
+        });
+      }
+
+      // Événements communs
+      socketRef.current.on('call-ended', ({ reason }) => {
+        console.log('Call ended:', reason);
         setIncomingCall(null);
         setCallActive(false);
+        setCalledExpertId(null);
       });
-      
+
       socketRef.current.on('disconnect', () => {
-        console.log('Expert disconnected from socket');
+        console.log('Disconnected from socket server');
       });
-      
+
       return () => {
         if (socketRef.current) {
           socketRef.current.disconnect();
         }
       };
     }
-  }, [user]);
+  }, [user, navigation]);
 
-  // Fetch list depending on role
+  // Récupérer la liste des utilisateurs
   useEffect(() => {
     if (user && user.role) {
       setLoading(true);
@@ -66,51 +104,65 @@ const HomeScreen = ({ navigation }) => {
     }
   }, [user]);
 
-  // Technician: call expert
   const handleCall = (expert) => {
-    if (callActive) return;
-    setCallActive(true);
-    setCalledExpertId(expert._id);
-    // Notify expert via socket
-    if (!socketRef.current) {
-      socketRef.current = io(SIGNALING_SERVER_URL);
-    }
-    socketRef.current.emit('call-expert', {
-      expertId: expert._id,
-      callerName: user.name || user.email || 'Technicien',
-    });
-    // Navigate to video call screen
-    navigation.navigate('VideoCall', {
-      roomId: expert._id,
-      expertName: expert.name,
-      isInitiator: true,
-    });
-  };
+  if (callActive) return;
 
-  // Expert: join call
-  const handleJoin = () => {
+  setCallActive(true);
+  setCalledExpertId(expert._id);
+
+  // Decode the JWT token to get the userId
+ const decodedToken = jwtDecode(user.token);
+const callerId = decodedToken.userId;
+
+  // Create a unique roomId
+  const roomId = `call-${callerId}-${expert._id}-${Date.now()}`;
+
+  console.log('Initiating call to expert:', expert._id, 'Room:', roomId);
+
+  // Send the call request
+  socketRef.current.emit('call-expert', {
+    expertId: expert._id,
+    callerName: user.name || user.email || 'Technicien',
+    roomId: roomId,
+    callerId: callerId, // Use the decoded userId
+  });
+};
+
+  // Fonction pour accepter un appel (expert)
+  const handleAcceptCall = () => {
     if (!incomingCall) return;
     
-    setCallActive(true);
-    setIncomingCall(null);
+    console.log('Accepting call:', incomingCall.roomId);
     
-    // Navigate to video call screen
-    navigation.navigate('VideoCall', { 
-      roomId: user.token,
+    // Accepter l'appel
+    socketRef.current.emit('accept-call', { 
+      roomId: incomingCall.roomId 
+    });
+    
+    // Naviguer vers l'écran d'appel
+    navigation.navigate('VideoCallScreen', { 
+      roomId: incomingCall.roomId,
       callerName: incomingCall.callerName || 'Technicien',
       isInitiator: false
     });
-  };
-
-  // Expert: decline call
-  const handleDecline = () => {
+    
     setIncomingCall(null);
-    if (socketRef.current) {
-      socketRef.current.emit('call-declined', { expertId: user.token });
-    }
   };
 
-  // Handle sign out
+  // Fonction pour décliner un appel (expert)
+  const handleDeclineCall = () => {
+    if (!incomingCall) return;
+    
+    console.log('Declining call:', incomingCall.roomId);
+    
+    socketRef.current.emit('decline-call', { 
+      roomId: incomingCall.roomId 
+    });
+    
+    setIncomingCall(null);
+  };
+
+  // Fonction de déconnexion
   const handleSignOut = async () => {
     try {
       if (socketRef.current) {
@@ -123,7 +175,7 @@ const HomeScreen = ({ navigation }) => {
     }
   };
 
-  // Reset call state when navigating back
+  // Réinitialiser l'état lors du retour sur l'écran
   useEffect(() => {
     const unsubscribe = navigation.addListener('focus', () => {
       setCallActive(false);
@@ -133,66 +185,88 @@ const HomeScreen = ({ navigation }) => {
     return unsubscribe;
   }, [navigation]);
 
-  
+  // Affichage de l'appel entrant pour les experts
+  const renderIncomingCall = () => {
+    if (!incomingCall) return null;
+
+    return (
+      <View style={styles.incomingCallOverlay}>
+        <View style={styles.incomingCallContainer}>
+          <Text style={styles.incomingCallTitle}>Appel entrant</Text>
+          <Text style={styles.incomingCallText}>
+            {incomingCall.callerName} vous appelle
+          </Text>
+          <View style={styles.callActions}>
+            <TouchableOpacity 
+              style={[styles.callButton, styles.acceptButton]} 
+              onPress={handleAcceptCall}
+            >
+              <Text style={styles.callButtonText}>Accepter</Text>
+            </TouchableOpacity>
+            <TouchableOpacity 
+              style={[styles.callButton, styles.declineButton]} 
+              onPress={handleDeclineCall}
+            >
+              <Text style={styles.callButtonText}>Décliner</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    );
+  };
 
   return (
     <View style={styles.container}>
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.welcomeText}>
-          Bienvenue, {user.name || user.email}
+          Bienvenue, {user?.name || user?.email}
         </Text>
         <Text style={styles.roleText}>
-          Rôle: {user.role === 'expert' ? 'Expert' : 'Technicien'}
+          Rôle: {user?.role === 'expert' ? 'Expert' : 'Technicien'}
         </Text>
         <TouchableOpacity style={styles.signOutButton} onPress={handleSignOut}>
           <Text style={styles.signOutText}>Déconnexion</Text>
         </TouchableOpacity>
       </View>
 
-      {/* Technician View */}
-      <View style={user.role === 'technician' ? styles.technicianContainer : styles.expertContainer}>
+      {/* Liste des utilisateurs */}
+      <View style={styles.userListContainer}>
         <Text style={styles.sectionTitle}>
-          {user.role === 'technician' ? 'Liste des Experts' : 'Liste des Techniciens'}
+          {user?.role === 'technician' ? 'Liste des Experts' : 'Liste des Techniciens'}
         </Text>
+        
         {loading ? (
           <ActivityIndicator size="large" color="#007AFF" />
         ) : (
           <>
-            <Text style={styles.expertsCount}>
-              {user.role === 'technician'
-                ? `Experts trouvés: ${userList.length}`
-                : `Techniciens trouvés: ${userList.length}`}
+            <Text style={styles.usersCount}>
+              {user?.role === 'technician'
+                ? `Experts disponibles: ${userList.length}`
+                : `Techniciens: ${userList.length}`}
             </Text>
             <FlatList
               data={userList}
               keyExtractor={item => item._id}
               renderItem={({ item }) => (
-                <View style={styles.expertItem}>
-                  <View style={styles.expertInfo}>
-                    <Text style={styles.expertName}>{item.name}</Text>
+                <View style={styles.userItem}>
+                  <View style={styles.userInfo}>
+                    <Text style={styles.userName}>{item.name}</Text>
+                    <Text style={styles.userEmail}>{item.email}</Text>
                   </View>
-                  {user.role === 'technician' ? (
+                  {user?.role === 'technician' && (
                     <TouchableOpacity
                       style={[
-                        styles.callButton,
-                        callActive && calledExpertId === item._id && styles.callButtonActive,
-                        callActive && styles.callButtonDisabled
+                        styles.actionButton,
+                        callActive && calledExpertId === item._id && styles.activeCallButton,
+                        callActive && calledExpertId !== item._id && styles.disabledButton
                       ]}
                       onPress={() => handleCall(item)}
                       disabled={callActive}
                     >
-                      <Text style={styles.callButtonText}>
-                        {callActive && calledExpertId === item._id ? 'En appel...' : 'Appeler'}
+                      <Text style={styles.actionButtonText}>
+                        {callActive && calledExpertId === item._id ? 'Appel en cours...' : 'Appeler'}
                       </Text>
-                    </TouchableOpacity>
-                  ) : (
-                    <TouchableOpacity
-                      style={[styles.callButton, !incomingCall && styles.callButtonDisabled]}
-                      onPress={handleJoin}
-                      disabled={!incomingCall}
-                    >
-                      <Text style={styles.callButtonText}>{incomingCall ? 'Rejoindre' : 'Rejoindre (en attente)'}</Text>
                     </TouchableOpacity>
                   )}
                 </View>
@@ -200,19 +274,25 @@ const HomeScreen = ({ navigation }) => {
               ListEmptyComponent={
                 <Text style={styles.emptyText}>Aucun utilisateur trouvé.</Text>
               }
-              refreshing={loading}
-              onRefresh={() => {
-                setLoading(true);
-                const fetchList = user.role === 'technician' ? userService.getExperts : userService.getTechnicians;
-                fetchList()
-                  .then(data => setUserList(Array.isArray(data) ? data : []))
-                  .catch(() => setUserList([]))
-                  .finally(() => setLoading(false));
-              }}
             />
           </>
         )}
       </View>
+
+      {/* Instructions pour les experts */}
+      {user?.role === 'expert' && !incomingCall && (
+        <View style={styles.expertInstructions}>
+          <Text style={styles.instructionsText}>
+            En attente d'appels...
+          </Text>
+          <Text style={styles.instructionsSubtext}>
+            Vous recevrez une notification lors d'un appel entrant
+          </Text>
+        </View>
+      )}
+
+      {/* Overlay pour les appels entrants */}
+      {renderIncomingCall()}
     </View>
   );
 };
@@ -256,13 +336,8 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: 'bold',
   },
-  technicianContainer: {
+  userListContainer: {
     flex: 1,
-  },
-  expertContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
   },
   sectionTitle: {
     fontSize: 20,
@@ -270,12 +345,12 @@ const styles = StyleSheet.create({
     marginBottom: 15,
     color: '#333',
   },
-  expertsCount: {
+  usersCount: {
     color: '#007AFF',
     marginBottom: 10,
     fontSize: 14,
   },
-  expertItem: {
+  userItem: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
@@ -289,33 +364,33 @@ const styles = StyleSheet.create({
     shadowRadius: 2,
     elevation: 2,
   },
-  expertInfo: {
+  userInfo: {
     flex: 1,
   },
-  expertName: {
+  userName: {
     fontSize: 16,
     fontWeight: 'bold',
     color: '#333',
   },
-  expertStatus: {
+  userEmail: {
     fontSize: 12,
     color: '#666',
     marginTop: 2,
   },
-  callButton: {
+  actionButton: {
     backgroundColor: '#28a745',
     padding: 12,
     borderRadius: 8,
     minWidth: 90,
     alignItems: 'center',
   },
-  callButtonActive: {
+  activeCallButton: {
     backgroundColor: '#ffc107',
   },
-  callButtonDisabled: {
+  disabledButton: {
     backgroundColor: '#ccc',
   },
-  callButtonText: {
+  actionButtonText: {
     color: 'white',
     fontSize: 14,
     fontWeight: 'bold',
@@ -325,44 +400,81 @@ const styles = StyleSheet.create({
     color: '#666',
     marginTop: 20,
   },
-  loadingText: {
+  expertInstructions: {
+    backgroundColor: '#fff',
+    padding: 20,
+    borderRadius: 10,
+    alignItems: 'center',
     marginTop: 20,
+  },
+  instructionsText: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#333',
+    marginBottom: 5,
+  },
+  instructionsSubtext: {
+    fontSize: 14,
     color: '#666',
+    textAlign: 'center',
+  },
+  incomingCallOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 1000,
   },
   incomingCallContainer: {
     backgroundColor: '#fff',
-    padding: 20,
+    padding: 30,
     borderRadius: 15,
     alignItems: 'center',
+    minWidth: 280,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
+    shadowOpacity: 0.3,
     shadowRadius: 8,
-    elevation: 5,
+    elevation: 8,
+  },
+  incomingCallTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#333',
+    marginBottom: 10,
   },
   incomingCallText: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    marginBottom: 20,
-    color: '#333',
+    fontSize: 16,
+    color: '#666',
+    marginBottom: 30,
+    textAlign: 'center',
   },
   callActions: {
     flexDirection: 'row',
     justifyContent: 'space-around',
     width: '100%',
   },
+  callButton: {
+    padding: 15,
+    borderRadius: 10,
+    minWidth: 100,
+    alignItems: 'center',
+    marginHorizontal: 10,
+  },
   acceptButton: {
     backgroundColor: '#28a745',
-    marginHorizontal: 10,
   },
   declineButton: {
     backgroundColor: '#dc3545',
-    marginHorizontal: 10,
   },
-  waitingText: {
+  callButtonText: {
+    color: 'white',
     fontSize: 16,
-    color: '#666',
-    textAlign: 'center',
+    fontWeight: 'bold',
   },
 });
 

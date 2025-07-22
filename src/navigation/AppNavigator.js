@@ -18,7 +18,8 @@ const AppNavigator = () => {
           // Écrans authentifiés
           <>
             <Stack.Screen name="Home" component={HomeScreen} />
-            <Stack.Screen name="VideoCall" component={require('../screens/VideoCallScreen').default} />
+            <Stack.Screen name="VideoCallScreen" component={require('../screens/VideoCallScreen').default} />
+
           </>
         ) : (
           // Écrans non authentifiés

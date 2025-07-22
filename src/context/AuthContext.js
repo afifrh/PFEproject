@@ -22,6 +22,7 @@ export const AuthProvider = ({ children }) => {
       console.error('Erreur lors de la suppression du token:', error);
     }
   };
+  
 
   const signIn = async (token, role) => {
     setLoading(true);
